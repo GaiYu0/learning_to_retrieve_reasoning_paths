@@ -6,6 +6,31 @@ try:
 except:
     from utils import find_hyper_linked_titles, remove_tags, normalize
 
+import numpy as np
+
+def fetchall(fields=[], path='models/hotpot_models/wiki_db/wiki_abst_only_hotpotqa_w_original_title.db'):
+    connection = sqlite3.connect(path, check_same_thread=False)
+    cursor = connection.cursor()
+    cursor.execute(f"SELECT {', '.join(fields) if len(fields) > 0 else '*'} FROM documents")
+    ret = cursor.fetchall()
+    cursor.close()
+    return ret
+
+def gr(sqlCtx):
+    fields = ['linked_title', 'original_title']
+    ret = fetchall(fields)
+    for i in range(len(ret)):
+        ret[i] += (i,)
+    df = sqlCtx.createDataFrame(ret, fields + ['#'])
+    src = df[['#', 'linked_title']].rdd.flatMap(lambda d: [(d['#'], title) for title in d['linked_title'].split('\t')]).toDF(['src', 'title'])
+    dst = df[['#', 'original_title']].withColumnRenamed('#', 'dst').withColumnRenamed('original_title', 'title')
+
+    df = src.join(dst, 'title', 'inner')
+    np.save('src', np.array(df[['src']].rdd.flatMap(lambda x: x).collect(), dtype=np.long))
+    np.save('dst', np.array(df[['dst']].rdd.flatMap(lambda x: x).collect(), dtype=np.long))
+
+    return df
+
 class DocDB(object):
     """Sqlite backed document storage.
 
@@ -44,7 +69,7 @@ class DocDB(object):
         result = cursor.fetchone()
         cursor.close()
         return result if result is None else result[0]
-    
+
     def get_hyper_linked(self, doc_id):
         """Fetch the hyper-linked titles of the doc for 'doc_id'."""
         cursor = self.connection.cursor()
@@ -55,7 +80,7 @@ class DocDB(object):
         result = cursor.fetchone()
         cursor.close()
         return result if (result is None or len(result[0]) == 0) else [normalize(title) for title in result[0].split("\t")]
-    
+
     def get_original_title(self, doc_id):
         """Fetch the original title name  of the doc."""
         cursor = self.connection.cursor()
@@ -66,7 +91,7 @@ class DocDB(object):
         result = cursor.fetchone()
         cursor.close()
         return result if result is None else result[0]
-    
+
     def get_doc_text_hyper_linked_titles_for_articles(self, doc_id):
         """
         fetch all of the paragraphs with their corresponding hyperlink titles.
@@ -89,10 +114,10 @@ class DocDB(object):
         else:
             hyper_linked_paragraphs = result[0].split("\n\n")
             paragraphs, hyper_linked_titles = [], []
-            
+
             for hyper_linked_paragraph in hyper_linked_paragraphs:
                 paragraphs.append(remove_tags(hyper_linked_paragraph))
                 hyper_linked_titles.append([normalize(title) for title in find_hyper_linked_titles(
                     hyper_linked_paragraph)])
-                
+
             return paragraphs, hyper_linked_titles
