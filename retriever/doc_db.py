@@ -8,6 +8,12 @@ except:
 
 import numpy as np
 
+from itertools import chain
+from multiprocessing.pool import ThreadPool
+import re
+
+import tqdm
+
 def fetchall(fields=[], path='models/hotpot_models/wiki_db/wiki_abst_only_hotpotqa_w_original_title.db'):
     connection = sqlite3.connect(path, check_same_thread=False)
     cursor = connection.cursor()
@@ -30,6 +36,46 @@ def gr(sqlCtx):
     np.save('dst', np.array(df[['dst']].rdd.flatMap(lambda x: x).collect(), dtype=np.long))
 
     return df
+
+def closest_docs(sqlCtx, hotpot, ranker, k, db, path='models/hotpot_models/closest_docs0.parquet'):
+    qs = hotpot[['question']].rdd.flatMap(lambda x: x).collect()
+    doc_ids, _ = zip(*ranker.batch_closest_docs(qs, k))
+    _doc_ids = sqlCtx.createDataFrame(list(chain(*[zip(len(x) * [i], len(x) * [qs[i]], x) for i, x in enumerate(doc_ids)])), ['qid', 'q', 'id'])
+    titles = db.join(_doc_ids, on='id', how='inner').withColumnRenamed('original_title', 'title')[['qid', 'q', 'title']]
+    titles.write.parquet(path, mode='overwrite')
+    return titles
+
+def more_docs(sqlCtx, titles, enwiki, ranker, k, radius, num_workers=None, path='models/hotpot_models/closest_docs%d.parquet'):
+    rows = enwiki.join(titles, on='title', how='inner')[['qid', 'q', 'text', 'text_with_links', 'charoffset_with_links']].rdd.collect()
+    def closest_docs(row):
+        indices = ranker.closest_sents(row['q'], row['text'], len(row['text']))
+        _titles = []
+        for index in indices:
+            if len(_titles) == k:
+                break
+            sent_with_links = row['text_with_links'][index]
+            appending = False
+            for m, n in row['charoffset_with_links'][index]:
+                tok = sent_with_links[m : n]
+                if tok.startswith('<a href='):
+                    appending = True
+                    _title = ''
+                elif tok == '</a>':
+                    try:
+                        _titles.append([row['qid'], row['q'], _title])
+                    except UnboundLocalError:
+                        pass
+                    appending = False
+                elif appending:
+                    _title = f'{_title} {tok}' if _title else tok
+
+        return _titles
+
+    with ThreadPool(num_workers) as pool:
+        _titles = sqlCtx.createDataFrame(list(chain(*tqdm.tqdm(pool.map(closest_docs, rows)))), ['qid', 'q', 'title'])
+
+    _titles.write.parquet(path % radius, mode='overwrite')
+    return _titles
 
 class DocDB(object):
     """Sqlite backed document storage.

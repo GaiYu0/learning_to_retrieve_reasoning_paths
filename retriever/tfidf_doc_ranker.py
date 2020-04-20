@@ -55,6 +55,25 @@ class TfidfDocRanker(object):
         """Convert doc_index --> doc_id"""
         return self.doc_dict[1][doc_index]
 
+    def closest_sents(self, query, sents, k=1):
+        spvec = self.text2spvec(query)
+        spmat = sp.hstack([self.text2spvec(sent).transpose() for sent in sents])
+        res = spvec * spmat
+
+        if len(res.data) <= k:
+            o_sort = np.argsort(-res.data)
+        else:
+            o = np.argpartition(-res.data, k)[0 : k]
+            o_sort = o[np.argsort(-res.data[o])]
+
+        return res.indices[o_sort]
+
+    def batch_closest_sents(self, queries, texts, k=1, num_workers=None):
+        with ThreadPool(num_workers) as threads:
+            closest_sents = lambda pair: self.closest_sents(pair[0], pair[1], k=k)
+            results = threads.map(closest_sents, zip(queries, texts))
+        return results
+
     def closest_docs(self, query, k=1):
         """Closest docs by dot product between query and documents
         in tfidf weighted word vector space.
@@ -94,7 +113,10 @@ class TfidfDocRanker(object):
         """
         # Get hashed ngrams
         # TODO: do we need to have normalize?
-        words = self.parse(normalize(query))
+        try:
+            words = self.parse(normalize(query))
+        except:
+            print(query)
         wids = [hash(w, self.hash_size) for w in words]
 
         if len(wids) == 0:
