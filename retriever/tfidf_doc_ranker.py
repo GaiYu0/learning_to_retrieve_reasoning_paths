@@ -28,7 +28,7 @@ class TfidfDocRanker(object):
     Scores new queries by taking sparse dot products.
     """
 
-    def __init__(self, tfidf_path=None, strict=True):
+    def __init__(self, tfidf_path=None, strict=True, doc_mat=True):
         """
         Args:
             tfidf_path: path to saved model file
@@ -38,7 +38,8 @@ class TfidfDocRanker(object):
         tfidf_path = tfidf_path
         logger.info('Loading %s' % tfidf_path)
         matrix, metadata = load_sparse_csr(tfidf_path)
-        self.doc_mat = matrix
+        if doc_mat:
+            self.doc_mat = matrix
         self.ngrams = metadata['ngram']
         self.hash_size = metadata['hash_size']
         self.tokenizer = SimpleTokenizer()
@@ -115,15 +116,15 @@ class TfidfDocRanker(object):
         # TODO: do we need to have normalize?
         try:
             words = self.parse(normalize(query))
+            wids = [hash(w, self.hash_size) for w in words]
         except:
-            print(query)
-        wids = [hash(w, self.hash_size) for w in words]
+            wids = []
 
         if len(wids) == 0:
             if self.strict:
                 raise RuntimeError('No valid word in: %s' % query)
             else:
-                logger.warning('No valid word in: %s' % query)
+#               logger.warning('No valid word in: %s' % query)
                 return sp.csr_matrix((1, self.hash_size))
 
         # Count TF

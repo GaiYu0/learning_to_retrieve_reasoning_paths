@@ -38,15 +38,15 @@ def gr(sqlCtx):
     return df
 
 def closest_docs(sqlCtx, hotpot, ranker, k, db, path='models/hotpot_models/closest_docs0.parquet'):
+    qids = hotpot[['_id']].rdd.flatMap(lambda x: x).collect()
     qs = hotpot[['question']].rdd.flatMap(lambda x: x).collect()
     doc_ids, _ = zip(*ranker.batch_closest_docs(qs, k))
-    _doc_ids = sqlCtx.createDataFrame(list(chain(*[zip(len(x) * [i], len(x) * [qs[i]], x) for i, x in enumerate(doc_ids)])), ['qid', 'q', 'id'])
+    _doc_ids = sqlCtx.createDataFrame(list(chain(*[zip(len(x) * [qid], len(x) * [q], x) for qid, q, x in zip(qids, qs, doc_ids)])), ['qid', 'q', 'id'])
     titles = db.join(_doc_ids, on='id', how='inner').withColumnRenamed('original_title', 'title')[['qid', 'q', 'title']]
     titles.write.parquet(path, mode='overwrite')
     return titles
 
 def more_docs(sqlCtx, titles, enwiki, ranker, k, radius, num_workers=None, path='models/hotpot_models/closest_docs%d.parquet'):
-    rows = enwiki.join(titles, on='title', how='inner')[['qid', 'q', 'text', 'text_with_links', 'charoffset_with_links']].rdd.collect()
     def closest_docs(row):
         indices = ranker.closest_sents(row['q'], row['text'], len(row['text']))
         _titles = []
@@ -71,11 +71,16 @@ def more_docs(sqlCtx, titles, enwiki, ranker, k, radius, num_workers=None, path=
 
         return _titles
 
-    with ThreadPool(num_workers) as pool:
-        _titles = sqlCtx.createDataFrame(list(chain(*tqdm.tqdm(pool.map(closest_docs, rows)))), ['qid', 'q', 'title'])
+    _titles = enwiki.join(titles, on='title', how='inner').rdd.flatMap(closest_docs).toDF(['qid', 'q', 'title'])
 
     _titles.write.parquet(path % radius, mode='overwrite')
     return _titles
+
+def recall(hops):
+    titles = None
+    gold = sc.parallelize(gold).toDF(['qid', 'titles'])
+    pairs = titles.join(gold, on='qid', how='inner')
+    ret = pairs.rdd.map(lambda r: [r['qid'], r['title'] in r['titles']]).reduceByKey(add).collect()
 
 class DocDB(object):
     """Sqlite backed document storage.
