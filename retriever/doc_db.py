@@ -8,13 +8,15 @@ except:
 
 import numpy as np
 
+from functools import reduce
 from itertools import chain
 from multiprocessing.pool import ThreadPool
+from operator import add
 import re
 
 import tqdm
 
-def fetchall(fields=[], path='models/hotpot_models/wiki_db/wiki_abst_only_hotpotqa_w_original_title.db'):
+def fetchall(path, fields=[]):
     connection = sqlite3.connect(path, check_same_thread=False)
     cursor = connection.cursor()
     cursor.execute(f"SELECT {', '.join(fields) if len(fields) > 0 else '*'} FROM documents")
@@ -22,27 +24,33 @@ def fetchall(fields=[], path='models/hotpot_models/wiki_db/wiki_abst_only_hotpot
     cursor.close()
     return ret
 
-def gr(sqlCtx):
-    fields = ['linked_title', 'original_title']
-    ret = fetchall(fields)
-    for i in range(len(ret)):
-        ret[i] += (i,)
-    df = sqlCtx.createDataFrame(ret, fields + ['#'])
-    src = df[['#', 'linked_title']].rdd.flatMap(lambda d: [(d['#'], title) for title in d['linked_title'].split('\t')]).toDF(['src', 'title'])
-    dst = df[['#', 'original_title']].withColumnRenamed('#', 'dst').withColumnRenamed('original_title', 'title')
+def gr(sc, path='models/hotpot_models/wiki_db/wiki_abst_only_hotpotqa_w_original_title.db'):
+    data = fetchall(path, ['original_title', 'linked_title'])
 
-    df = src.join(dst, 'title', 'inner')
-    np.save('src', np.array(df[['src']].rdd.flatMap(lambda x: x).collect(), dtype=np.long))
-    np.save('dst', np.array(df[['dst']].rdd.flatMap(lambda x: x).collect(), dtype=np.long))
+    df = sc.parallelize(data).flatMap(lambda r: [[r[0], x] for x in set(r[1].split('\t'))]).toDF(['src_title', 'dst_title'])
 
-    return df
+    _title2id = sc.parallelize([[i, title] for i, [title, _] in enumerate(data)]).toDF(['id', 'title'])
+    title2id = lambda x: _title2id.withColumnRenamed('id', x).withColumnRenamed('title', x + '_title')
+
+    _df = df.join(title2id('src'), 'src_title', 'inner').join(title2id('dst'), 'dst_title', 'inner')
+    src, dst = map(np.array, zip(*_df.rdd.map(lambda r: [r['src'], r['dst']]).collect()))
+
+    prefix = 'models/hotpot_models'
+    _title2id.write.parquet(prefix + '/title2id.parquet', mode='overwrite')
+    np.save(prefix + '/src', src)
+    np.save(prefix + '/dst', dst)
+
+    return _title2id, src, dst
+
+def distance():
+    pass
 
 def closest_docs(sqlCtx, hotpot, ranker, k, db, path='models/hotpot_models/closest_docs0.parquet'):
     qids = hotpot[['_id']].rdd.flatMap(lambda x: x).collect()
     qs = hotpot[['question']].rdd.flatMap(lambda x: x).collect()
     doc_ids, _ = zip(*ranker.batch_closest_docs(qs, k))
     _doc_ids = sqlCtx.createDataFrame(list(chain(*[zip(len(x) * [qid], len(x) * [q], x) for qid, q, x in zip(qids, qs, doc_ids)])), ['qid', 'q', 'id'])
-    titles = db.join(_doc_ids, on='id', how='inner').withColumnRenamed('original_title', 'title')[['qid', 'q', 'title']]
+    titles = db.join(_doc_ids, on='id', how='inner').withColumnRenamed('original_title', 'title')[['qid', 'q', 'title']].distinct().persist()
     titles.write.parquet(path, mode='overwrite')
     return titles
 
@@ -56,31 +64,32 @@ def more_docs(sqlCtx, titles, enwiki, ranker, k, radius, num_workers=None, path=
             sent_with_links = row['text_with_links'][index]
             appending = False
             for m, n in row['charoffset_with_links'][index]:
-                tok = sent_with_links[m : n]
-                if tok.startswith('<a href='):
+                token = sent_with_links[m : n]
+                if token.startswith('<a href='):
                     appending = True
                     _title = ''
-                elif tok == '</a>':
+                elif token == '</a>':
                     try:
                         _titles.append([row['qid'], row['q'], _title])
                     except UnboundLocalError:
                         pass
                     appending = False
                 elif appending:
-                    _title = f'{_title} {tok}' if _title else tok
+                    _title = f'{_title} {token}' if _title else token
 
         return _titles
 
-    _titles = enwiki.join(titles, on='title', how='inner').rdd.flatMap(closest_docs).toDF(['qid', 'q', 'title'])
+    _titles = enwiki.join(titles, on='title', how='inner').rdd.flatMap(closest_docs).toDF(['qid', 'q', 'title']).distinct().persist()
 
     _titles.write.parquet(path % radius, mode='overwrite')
     return _titles
 
-def recall(hops):
-    titles = None
+def recall(sc, gold, hops):
+    titles = reduce(type(hops[0]).union, hops).distinct()
     gold = sc.parallelize(gold).toDF(['qid', 'titles'])
     pairs = titles.join(gold, on='qid', how='inner')
-    ret = pairs.rdd.map(lambda r: [r['qid'], r['title'] in r['titles']]).reduceByKey(add).collect()
+    _, ns = zip(*pairs.rdd.map(lambda r: [r['qid'], r['title'] in r['titles']]).reduceByKey(add).collect())
+    return ns
 
 class DocDB(object):
     """Sqlite backed document storage.
