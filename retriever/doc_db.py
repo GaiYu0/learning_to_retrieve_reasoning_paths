@@ -11,9 +11,10 @@ import numpy as np
 from functools import reduce
 from itertools import chain
 from multiprocessing.pool import ThreadPool
-from operator import add
+from operator import *
 import re
 
+from pyspark.sql.functions import col
 import tqdm
 
 def fetchall(path, fields=[]):
@@ -42,47 +43,60 @@ def gr(sc, path='models/hotpot_models/wiki_db/wiki_abst_only_hotpotqa_w_original
 
     return _title2id, src, dst
 
-def distance():
-    pass
+def filter_links(link2sent, k):
+    dst = link2sent.groupBy('dst').count().filter(col('count') < k)
+    return link2sent.join(dst, 'dst', 'inner')
 
-def closest_docs(sqlCtx, hotpot, ranker, k, db, path='models/hotpot_models/closest_docs0.parquet'):
-    qids = hotpot[['_id']].rdd.flatMap(lambda x: x).collect()
-    qs = hotpot[['question']].rdd.flatMap(lambda x: x).collect()
-    doc_ids, _ = zip(*ranker.batch_closest_docs(qs, k))
-    _doc_ids = sqlCtx.createDataFrame(list(chain(*[zip(len(x) * [qid], len(x) * [q], x) for qid, q, x in zip(qids, qs, doc_ids)])), ['qid', 'q', 'id'])
-    titles = db.join(_doc_ids, on='id', how='inner').withColumnRenamed('original_title', 'title')[['qid', 'q', 'title']].distinct().persist()
-    titles.write.parquet(path, mode='overwrite')
-    return titles
+def closest_docs(sqlCtx, hotpot, ranker, k, db):
+    qids, qs = zip(*hotpot.rdd.map(lambda r: [r['_id'], r['question']]).collect())
+    xs, _ = zip(*ranker.batch_closest_docs(qs, k))
+    df = sqlCtx.createDataFrame(list(chain(*[zip(len(x) * [qid], len(x) * [q], x)
+                                             for qid, q, x in zip(qids, qs, xs)])), ['qid', 'q', 'id'])
+    return df.join(db, on='id', how='inner').withColumnRenamed('original_title', 'title').select('qid', 'q', 'title').distinct().persist()
 
-def more_docs(sqlCtx, titles, enwiki, ranker, k, radius, num_workers=None, path='models/hotpot_models/closest_docs%d.parquet'):
-    def closest_docs(row):
-        indices = ranker.closest_sents(row['q'], row['text'], len(row['text']))
-        _titles = []
-        for index in indices:
-            if len(_titles) == k:
-                break
-            sent_with_links = row['text_with_links'][index]
-            appending = False
-            for m, n in row['charoffset_with_links'][index]:
-                token = sent_with_links[m : n]
-                if token.startswith('<a href='):
-                    appending = True
-                    _title = ''
-                elif token == '</a>':
-                    try:
-                        _titles.append([row['qid'], row['q'], _title])
-                    except UnboundLocalError:
-                        pass
-                    appending = False
-                elif appending:
-                    _title = f'{_title} {token}' if _title else token
+'''
+def closest_docs(sc, hotpot, ranker, k, db):
+    _ranker = sc.broadcast(ranker)
+    def flat_mapper(r):
+        doc_ids, _ = _ranker.value.closest_docs(r['question'], k)
+        return [[r['_id'], r['question'], doc_id] for doc_id in doc_ids]
 
-        return _titles
+    df = hotpot.rdd.flatMap(flat_mapper).toDF(['qid', 'q', 'id'])
+    return df.join(db, on='id', how='inner').withColumnRenamed('original_title', 'title').select('qid', 'q', 'title').distinct().persist()
+'''
 
-    _titles = enwiki.join(titles, on='title', how='inner').rdd.flatMap(closest_docs).toDF(['qid', 'q', 'title']).distinct().persist()
+def expand(titles, link2sent, ranker, k):
+    def flat_mapper(pair):
+        [qid, q], values = pair
+        us, vs, sents = zip(*values)
+        return [[qid, q, us[i], vs[i]] for i in ranker.closest_sents(q, sents, k)]
 
-    _titles.write.parquet(path % radius, mode='overwrite')
-    return _titles
+    mapper = lambda r: [(r['qid'], r['q']), [r['src'], r['dst'], r['sent']]]
+    join = lambda col: titles.withColumnRenamed('title', col).join(link2sent, col, 'inner').rdd.map(mapper)
+    rdd = join('src').union(join('dst')).groupByKey().flatMap(flat_mapper)
+    return rdd.toDF(['qid', 'q', 'src', 'dst']).distinct().persist()
+
+def build_inputs(df, gold, link2sent, tokenizer):
+    rdd = df.join(link2sent, ['src', 'dst'], 'inner').rdd
+    mapper = lambda r: [r['qid'], r['q'], r['sent'], {r['src'], r['dst']} == set(r['titles'])]
+    return zip(*df.join(link2sent, ['src', 'dst'], 'inner').join(gold, 'qid', 'inner').rdd.map(mapper).collect())
+
+def link2sent(sqlCtx, enwiki, title2id):
+    def flat_mapper(row):
+        return sum(([[(row['title'], title), sent] for title in find_hyper_linked_titles(sent_with_links)]
+                    for sent, sent_with_links in zip(row['text'], row['text_with_links'])), [])
+
+    def mapper(row):
+        [[src, dst], sent] = row
+        return src, dst, sent
+
+    rdd = enwiki.rdd.flatMap(flat_mapper).reduceByKey(lambda s, t: ' '.join([s, t])).map(mapper)
+    titles = title2id.select('title').withColumnRenamed('title', 'dst')
+    df = rdd.toDF(['src', 'dst', 'sent']).join(titles, 'dst', 'inner').persist()
+    return df
+
+def link2toks(link2sent, tokenizer):
+    return link2sent.rdd.map(lambda r: [r['src'], r['dst'], tokenizer.tokenize(r['sent'])]).toDF(['src', 'dst', 'toks']).persist()
 
 def recall(sc, gold, hops):
     titles = reduce(type(hops[0]).union, hops).distinct()
