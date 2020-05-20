@@ -76,10 +76,30 @@ def expand(titles, link2sent, ranker, k):
     rdd = join('src').union(join('dst')).groupByKey().flatMap(flat_mapper)
     return rdd.toDF(['qid', 'q', 'src', 'dst']).distinct().persist()
 
-def build_inputs(df, gold, link2sent, tokenizer):
+def build_inputs(df, gold, link2sent):
     rdd = df.join(link2sent, ['src', 'dst'], 'inner').rdd
     mapper = lambda r: [r['qid'], r['q'], r['sent'], {r['src'], r['dst']} == set(r['titles'])]
-    return zip(*df.join(link2sent, ['src', 'dst'], 'inner').join(gold, 'qid', 'inner').rdd.map(mapper).collect())
+    return df.join(link2sent, ['src', 'dst'], 'inner').join(gold, 'qid', 'inner').rdd.map(mapper).persist()
+
+def filter_inputs(rdd):
+    def mapper(r):
+        qid, q, sent, y = r
+        return qid, tokenizer.encode(q, sent), y
+
+    def filterer(r):
+        _, ids, _ = r
+        return len(ids) > idenizer.max_model_input_sizes['bert-base-uncased']
+
+    return zip(*rdd.map(mapper).filter(filterer).collect())  # qid, ids, y
+
+class ListOfIDLists:
+    def __init__(self, xs):
+        self.x = np.hstack(list(map(np.array, xs)))
+        self.indptr = np.cumsum(np.array([0] + list(map(len, xs))))
+
+    def __getitem__(self, index):
+        x = self.x[self.indptr[index] : self.indptr[index + 1]]
+        return x.tolist()
 
 def link2sent(sqlCtx, enwiki, title2id):
     def flat_mapper(row):
