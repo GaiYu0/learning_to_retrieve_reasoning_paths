@@ -93,13 +93,25 @@ def filter_inputs(rdd):
     return zip(*rdd.map(mapper).filter(filterer).collect())  # qid, ids, y
 
 class ListOfIDLists:
-    def __init__(self, xs):
-        self.x = np.hstack(list(map(np.array, xs)))
+    def __init__(self, xs, path=''):
+        self.path = path
+        self.data = np.hstack(list(map(np.array, xs)))
         self.indptr = np.cumsum(np.array([0] + list(map(len, xs))))
 
     def __getitem__(self, index):
-        x = self.x[self.indptr[index] : self.indptr[index + 1]]
-        return x.tolist()
+        data = self.data[self.indptr[index] : self.indptr[index + 1]]
+        return data.tolist()
+
+    def __getstate__(self):
+        if not self.path:
+            raise RuntimeError()
+        np.save(self.path + '-data', self.data)
+        np.save(self.path + '-indptr', self.indptr)
+        return {k : v for k, v in self.__dict__.items() if k not in ['data', 'indptr']}
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.data, self.indptr = np.load(self.path + '-data.npy'), np.load(self.path + '-indptr.npy')
 
 def link2sent(sqlCtx, enwiki, title2id):
     def flat_mapper(row):
