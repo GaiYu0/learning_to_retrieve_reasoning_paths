@@ -76,6 +76,18 @@ def expand(titles, link2sent, ranker, k):
     rdd = join('src').union(join('dst')).groupByKey().flatMap(flat_mapper)
     return rdd.toDF(['qid', 'q', 'src', 'dst']).distinct().persist()
 
+def segment(lens, lower=5, upper=8, size_min=32):
+    pairs = []
+    for i in range(lower, upper + 1):
+        m, n = 2 ** (i - 1), 2 ** i
+        [nz] = np.nonzero(lens < n if i == lower else np.logical_and(m < lens, lens <= n))
+        nz_min, nz_max = nz.min(), nz.max()
+        size = size_min * 4 ** (upper - i)
+        for j in range(nz_min, nz_max + 1, size):
+            pairs.append([j, min(j + size, nz_max + 1)])
+
+    return pairs
+
 def build_inputs(df, gold, link2sent):
     rdd = df.join(link2sent, ['src', 'dst'], 'inner').rdd
     mapper = lambda r: [r['qid'], r['q'], r['sent'], {r['src'], r['dst']} == set(r['titles'])]
