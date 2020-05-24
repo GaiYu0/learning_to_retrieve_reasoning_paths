@@ -110,5 +110,5 @@ if __name__ == '__main__':
         print(f'[{i + 1}/{args.n_iters}]{_round(loss)}')
 
         if (i + 1) % args.test_freq == 0:
-            p, r, f1 = test(bert, xs_test, ys_test)
+            p, r, f1 = test(bert, xs_test, ys_test, z_test, nz_test)
             print(f'[{i + 1}/{args.n_iters}]Precision: {_round(p)} | Recall: {_round(r)} | F1: {_round(f1)}')
