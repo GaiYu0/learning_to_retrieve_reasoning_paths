@@ -21,6 +21,7 @@ parser.add_argument('--logdir', type=str, default='')
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--n-iters', type=int, required=True)
 parser.add_argument('--num-warmup-steps', type=int, default=0)
+parser.add_argument('--ratio', type=int, nargs='+', default=[1, 1])
 parser.add_argument('--train-data', type=str, default='data/hotpot/train.pickle')
 parser.add_argument('--test-freq', type=int, required=True)
 parser.add_argument('--weight-decay', type=float, default=0)
@@ -34,8 +35,10 @@ def batch(xs, ys=None):
     return bert_args, bert_kwargs
 
 def train(bert, xs, ys, z, nz):
-    i = np.hstack([npr.choice(z, size=args.train_batch_size // 2),
-                   npr.choice(nz, size=args.train_batch_size // 2)])
+    a, b = args.ratio
+    c =  a + b
+    i = np.hstack([npr.choice(nz, size=a * args.train_batch_size // c),
+                   npr.choice(z, size=b * args.train_batch_size // c)])
 
     bert_args, bert_kwargs = batch([xs[j] for j in i], [not ys[j] for j in i])
 
@@ -95,30 +98,31 @@ if __name__ == '__main__':
     print('Loading training data...')
     t = time.time()
     _, xs_train, ys_train = pickle.load(open(args.train_data, 'rb'))
-    print(f'Training data loaded ({_round(time.time() - t)}s).')
+    print(f'{len(ys_train)} training samples loaded ({_round(time.time() - t)}s).')
     y_train = np.array(ys_train)
 
     print('Loading test data...')
     t = time.time()
     _, xs_test, ys_test = pickle.load(open(args.test_data, 'rb'))
-    print(f'Test data loaded ({_round(time.time() - t)}s).')
+    print(f'{len(ys_test)} test samples loaded ({_round(time.time() - t)}s).')
     y_test = np.array(ys_test)
 
     [z_train], [nz_train] = np.nonzero(np.logical_not(y_train)), np.nonzero(y_train)
     [z_test], [nz_test] = np.nonzero(np.logical_not(y_test)), np.nonzero(y_test)
 
-    writer = SummaryWriter(args.logdir) if args.logidr else None
+    writer = SummaryWriter(args.logdir) if args.logdir else None
 
     for i in range(args.n_iters):
         if i % args.test_freq == 0:
             p, r, f1 = test(bert, xs_test, ys_test, z_test, nz_test)
             print(f'[{i}/{args.n_iters}]Precision: {_round(p)} | Recall: {_round(r)} | F1: {_round(f1)}')
             if writer is not None:
-                writer.add_scalar('precision', p, i + 1)
-                writer.add_scalar('recall', r, i + 1)
-                writer.add_scalar('f1', f1, i + 1)
+                writer.add_scalar('precision', p, i)
+                writer.add_scalar('recall', r, i)
+                writer.add_scalar('f1', f1, i)
 
         loss = train(bert, xs_train, ys_train, z_train, nz_train)
-        print(f'[{i + 1}/{args.n_iters}]{_round(loss)}')
-        if writer is not None:
+        if writer is None:
+            print(f'[{i + 1}/{args.n_iters}]{_round(loss)}')
+        else:
             writer.add_scalar('loss', loss, i + 1)
