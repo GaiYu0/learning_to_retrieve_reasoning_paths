@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 import numpy.random as npr
+from tensorboardX import SummaryWriter
 import torch as th
 from torch.optim import Adam
 from tqdm import tqdm
@@ -16,6 +17,7 @@ parser = ArgumentParser()
 parser.add_argument('--train-batch-size', type=int, required=True)
 parser.add_argument('--test-data', type=str, default='data/hotpot/test.pickle')
 parser.add_argument('--test-batch-size', type=int, required=True)
+parser.add_argument('--logdir', type=str, default='')
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--n-iters', type=int, required=True)
 parser.add_argument('--num-warmup-steps', type=int, default=0)
@@ -105,10 +107,18 @@ if __name__ == '__main__':
     [z_train], [nz_train] = np.nonzero(np.logical_not(y_train)), np.nonzero(y_train)
     [z_test], [nz_test] = np.nonzero(np.logical_not(y_test)), np.nonzero(y_test)
 
+    writer = SummaryWriter(args.logdir) if args.logidr else None
+
     for i in range(args.n_iters):
+        if i % args.test_freq == 0:
+            p, r, f1 = test(bert, xs_test, ys_test, z_test, nz_test)
+            print(f'[{i}/{args.n_iters}]Precision: {_round(p)} | Recall: {_round(r)} | F1: {_round(f1)}')
+            if writer is not None:
+                writer.add_scalar('precision', p, i + 1)
+                writer.add_scalar('recall', r, i + 1)
+                writer.add_scalar('f1', f1, i + 1)
+
         loss = train(bert, xs_train, ys_train, z_train, nz_train)
         print(f'[{i + 1}/{args.n_iters}]{_round(loss)}')
-
-        if (i + 1) % args.test_freq == 0:
-            p, r, f1 = test(bert, xs_test, ys_test, z_test, nz_test)
-            print(f'[{i + 1}/{args.n_iters}]Precision: {_round(p)} | Recall: {_round(r)} | F1: {_round(f1)}')
+        if writer is not None:
+            writer.add_scalar('loss', loss, i + 1)
