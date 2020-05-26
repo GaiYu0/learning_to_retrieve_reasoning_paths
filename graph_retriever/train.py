@@ -43,13 +43,18 @@ def train(bert, xs, ys, indptr, size):
     bert_args, bert_kwargs = batch([xs[j] for j in i], [not ys[j] for j in i])
 
     bert.train()
-    next_sentence_loss, _ = bert(*bert_args, **bert_kwargs)
+    next_sentence_loss, seq_relationship_scores = bert(*bert_args, **bert_kwargs)
 
+    '''
     optimizer.zero_grad()
     next_sentence_loss.backward()
     optimizer.step()
 
     return next_sentence_loss.item()
+    '''
+
+    logp = seq_relationship_scores.view(-1, c).log_softmax(1)
+    return -th.mean(logp[:, 0] - th.sum(logp[:, 1:], 1))
 
 def test(bert, xs, ys, indptr, size):
     i = sample(indptr, size, 1000, 7)  # 250 batches
@@ -60,7 +65,7 @@ def test(bert, xs, ys, indptr, size):
             [seq_relationship_score] = bert(*bert_args, **bert_kwargs)
             probability = seq_relationship_score[:, 0]
             _, argmax = probability.view(4, 8).max(1)
-            em += argmax.eq(1).sum().item()
+            em += argmax.eq(0).sum().item()
         return em / 1000
 
 '''
