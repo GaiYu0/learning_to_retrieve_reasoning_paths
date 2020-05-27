@@ -10,6 +10,7 @@ import numpy.random as npr
 from tensorboardX import SummaryWriter
 import torch as th
 from torch.optim import Adam
+from torch_scatter import scatter_max
 from tqdm import tqdm
 from transformers import AdamW, BertTokenizer, BertForNextSentencePrediction, get_linear_schedule_with_warmup
 
@@ -64,18 +65,6 @@ def train(bert, xs, ys, indptr, size):
 
     return loss.item()
 
-def test(bert, xs, ys, indptr, size):
-    i = sample(indptr, size, 1000, 7)  # 250 batches
-    with th.no_grad():
-        em = 0
-        for j in tqdm(np.array_split(i, len(i) // 32)):
-            bert_args, bert_kwargs = batch([xs[k] for k in j])
-            [seq_relationship_score] = bert(*bert_args, **bert_kwargs)
-            probability = seq_relationship_score.log_softmax(1)[:, 0]
-            _, argmax = probability.view(4, 8).max(1)
-            em += argmax.eq(0).sum().item()
-        return em / 1000
-
 '''
 def test(bert, xs, ys, z, nz):
     i = np.hstack([nz, npr.choice(z, size=len(nz))])
@@ -98,6 +87,32 @@ def test(bert, xs, ys, z, nz):
 
     return p, r, f1
 '''
+
+'''
+def test(bert, xs, ys, indptr, size):
+    i = sample(indptr, size, 1000, 7)  # 250 batches
+    with th.no_grad():
+        em = 0
+        for j in tqdm(np.array_split(i, len(i) // 32)):
+            bert_args, bert_kwargs = batch([xs[k] for k in j])
+            [seq_relationship_score] = bert(*bert_args, **bert_kwargs)
+            probability = seq_relationship_score.log_softmax(1)[:, 0]
+            _, argmax = probability.view(4, 8).max(1)
+            em += argmax.eq(0).sum().item()
+        return em / 1000
+'''
+
+def test(bert, xs, indptr, size):
+    ps = []
+    with th.no_grad():
+        for i in tqdm(range(len(xs) // 32 + 1)):
+            bert_args, bert_kwargs = batch([xs[32 * i + j] for j in range(32)])
+            [seq_relationship_score] = bert(*bert_args, **bert_kwargs)
+            ps.append(seq_relationship_score.softmax(1))
+    p = th.cat(ps)
+    i = th.arange(len(size), device=device).repeat_interleave(size)
+    _, argmax = scatter_max(p, i)
+    return argmax.eq(indptr[:-1]) / len(size)
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -167,7 +182,9 @@ if __name__ == '__main__':
                 writer.add_scalar('recall', r, i)
                 writer.add_scalar('f1', f1, i)
             '''
-            emr = test(bert, xs_test, ys_test, test_indptr, test_size)
+#           emr = test(bert, xs_test, ys_test, test_indptr, test_size)
+            n = 10
+            emr = test(bert, xs_test[:test_indptr[n + 1]], test_indptr[:n], test_size[:n])
             print(f'[{i}/{args.n_iters}]EMR: {_round(emr)}')
             if writer is not None:
                 writer.add_scalar('emr', emr, i)
