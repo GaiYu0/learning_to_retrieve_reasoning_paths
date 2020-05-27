@@ -53,8 +53,16 @@ def train(bert, xs, ys, indptr, size):
     return next_sentence_loss.item()
     '''
 
-    logp = seq_relationship_scores.view(-1, c).log_softmax(1)
-    return -th.mean(logp[:, 0] - th.sum(logp[:, 1:], 1))
+    logp = seq_relationship_scores.log_softmax(1)
+    pos = logp[:, 0].view(-1, c)[:, 0]
+    neg = logp[:, 1].view(-1, c)[:, 1:].sum(1)
+    loss = -th.mean(pos + neg)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    return loss.item()
 
 def test(bert, xs, ys, indptr, size):
     i = sample(indptr, size, 1000, 7)  # 250 batches
@@ -63,7 +71,7 @@ def test(bert, xs, ys, indptr, size):
         for j in tqdm(np.array_split(i, len(i) // 32)):
             bert_args, bert_kwargs = batch([xs[k] for k in j])
             [seq_relationship_score] = bert(*bert_args, **bert_kwargs)
-            probability = seq_relationship_score[:, 0]
+            probability = seq_relationship_score.log_softmax(1)[:, 0]
             _, argmax = probability.view(4, 8).max(1)
             em += argmax.eq(0).sum().item()
         return em / 1000
