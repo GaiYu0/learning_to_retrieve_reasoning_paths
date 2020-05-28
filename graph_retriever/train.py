@@ -9,6 +9,7 @@ import numpy as np
 import numpy.random as npr
 from tensorboardX import SummaryWriter
 import torch as th
+import torch.nn as nn
 from torch.optim import Adam
 from torch_scatter import scatter_max
 from tqdm import tqdm
@@ -135,6 +136,8 @@ if __name__ == '__main__':
 
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
     bert = BertForNextSentencePrediction.from_pretrained('bert-base-uncased').to(device)
+    if torch.cuda.device_count() > 1:
+        bert = nn.DataParallel(bert)
 
     no_decay = ["bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
